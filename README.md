@@ -1,23 +1,31 @@
 # TG-CHANNEL-MANAGER
 
-Telegram management bot for a developer/tech-community portfolio channel.
+Telegram channel management bot with an admin-only control panel.
 
-## MVP features
+## V1 features
 
-- Admin-only control
-- Publish channel posts
-- Edit bot-authored channel posts
+- Admin-only access
+- Button-based control panel
+- Publish text, photos, videos and documents
+- Preview before publishing
+- Edit bot-authored text posts and media captions
+- Delete channel posts where the bot has permission
 - Pin and unpin posts
-- Publish a starter project index
-- Keep secrets outside GitHub with `.env`
+- View channel information and subscriber/member count
+- Legacy command controls remain available
+- Secrets stay outside GitHub with `.env`
 
-> Telegram Bot API limitation: a bot can edit messages it sent itself. It cannot arbitrarily rewrite old messages posted manually by your personal Telegram account.
+## Telegram limitation
+
+The normal Telegram Bot API does not let a bot impersonate a personal Telegram account. Posts created through this bot can be managed reliably by the bot. Some channel moderation actions on other messages may be available when Telegram grants the bot the corresponding administrator permission, but arbitrary editing of messages authored by a personal account is not supported by the Bot API.
+
+Using a user account through MTProto is a different architecture and requires user-account authentication/session credentials. It is intentionally not part of V1.
 
 ## Setup
 
 1. Create a bot with **@BotFather** and copy its token.
-2. Add the bot to your Telegram channel as an administrator.
-3. Give it permission to post, edit and pin messages.
+2. Add the bot to the Telegram channel as an administrator.
+3. Give it permissions to post, edit, delete and pin messages.
 4. Clone this repository.
 5. Create a virtual environment and install dependencies:
 
@@ -28,26 +36,26 @@ pip install -r requirements.txt
 ```
 
 6. Copy `.env.example` to `.env`.
-7. Put your bot token, channel username/ID and Telegram user ID in `.env`.
+7. Set the bot token, channel username/ID and admin Telegram user ID.
 8. Run:
 
 ```bash
 python bot.py
 ```
 
-Message the bot with `/id` to learn your Telegram user ID, then add it to `ADMIN_USER_IDS`.
+Open a private chat with the bot and send `/start`.
 
 ## Commands
 
-- `/start`
+- `/start` — open control panel
 - `/help`
 - `/id`
 - `/post <text>`
 - `/edit <message_id> <new text>`
+- `/delete <message_id>`
 - `/pin <message_id>`
 - `/unpin <message_id>`
-- `/projectindex`
 
 ## Next phase
 
-Planned additions include persistent project records, rich project cards, GitHub synchronization, scheduled updates, media posting, drafts/approval flow, analytics and multi-channel support.
+Planned additions: persistent post history, scheduling, multi-channel support, subscription/access management and payments.
