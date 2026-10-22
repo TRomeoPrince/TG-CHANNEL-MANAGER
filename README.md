@@ -1,61 +1,89 @@
 # TG-CHANNEL-MANAGER
 
-Telegram channel management bot with an admin-only control panel.
+Full Telegram channel operations bot for managing one or many channels from a private admin control panel.
 
-## V1 features
+## Full version
 
-- Admin-only access
-- Button-based control panel
-- Publish text, photos, videos and documents
-- Preview before publishing
-- Edit bot-authored text posts and media captions
-- Delete channel posts where the bot has permission
-- Pin and unpin posts
-- View channel information and subscriber/member count
-- Legacy command controls remain available
-- Secrets stay outside GitHub with `.env`
+### Publishing
+- Text, photo, video and document posts
+- Media captions
+- Preview before publish
+- Publish immediately or schedule for later
+- Quick text publishing command
+- No local media archive required: Telegram message references are reused
 
-## Telegram limitation
+### Channel management
+- Multiple managed channels
+- Add/disable channels without changing code
+- Verify the bot is an administrator before adding a channel
+- Channel aliases
+- Per-channel publishing
 
-The normal Telegram Bot API does not let a bot impersonate a personal Telegram account. Posts created through this bot can be managed reliably by the bot. Some channel moderation actions on other messages may be available when Telegram grants the bot the corresponding administrator permission, but arbitrary editing of messages authored by a personal account is not supported by the Bot API.
+### Post management
+- Persistent SQLite post history
+- Edit text posts and media captions
+- Delete posts
+- Pin/unpin posts
+- Manage arbitrary channel message IDs when Telegram permits the bot action
+- Scheduled-post records survive bot restarts
 
-Using a user account through MTProto is a different architecture and requires user-account authentication/session credentials. It is intentionally not part of V1.
+### Administration
+- Strict admin-user allowlist
+- Button-based private control panel
+- Dashboard
+- Direct command fallback
+- Secrets/configuration through environment variables
+- Configurable timezone and database location
 
-## Setup
-
-1. Create a bot with **@BotFather** and copy its token.
-2. Add the bot to the Telegram channel as an administrator.
-3. Give it permissions to post, edit, delete and pin messages.
-4. Clone this repository.
-5. Create a virtual environment and install dependencies:
+## Install
 
 ```bash
+git clone https://github.com/TRomeoPrince/TG-CHANNEL-MANAGER.git
+cd TG-CHANNEL-MANAGER
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-6. Copy `.env.example` to `.env`.
-7. Set the bot token, channel username/ID and admin Telegram user ID.
-8. Run:
-
-```bash
+copy .env.example .env
 python bot.py
 ```
 
-Open a private chat with the bot and send `/start`.
+Fill in `.env` before running.
 
-## Commands
+## Telegram setup
 
-- `/start` — open control panel
-- `/help`
+Create the bot with BotFather, add it as administrator to every channel it should manage, and grant only the permissions you need: posting, editing/deleting messages and pinning.
+
+Open the bot privately and send `/id`. Put your Telegram ID in `ADMIN_USER_IDS`, restart, then use `/start`.
+
+## Main commands
+
+- `/start` — full control panel
 - `/id`
+- `/addchannel <@username|-100id> [alias]`
+- `/removechannel <channel id>`
+- `/channels`
 - `/post <text>`
-- `/edit <message_id> <new text>`
-- `/delete <message_id>`
-- `/pin <message_id>`
-- `/unpin <message_id>`
+- `/edit <channel> <message_id> <text>`
+- `/delete <channel> <message_id>`
+- `/pin <channel> <message_id>`
+- `/unpin <channel> <message_id>`
 
-## Next phase
+## Editing limitation
 
-Planned additions: persistent post history, scheduling, multi-channel support, subscription/access management and payments.
+The Telegram Bot API does not allow a bot to impersonate your personal Telegram account. The manager can fully manage posts it authored and can perform administrator moderation actions Telegram exposes to bots. Arbitrarily editing the text of a message authored by your personal account is not a Bot API capability.
+
+An MTProto user-account controller is possible as a separate optional architecture, but it requires authenticating and protecting a real Telegram account session. It is deliberately not bundled into the default bot.
+
+## Architecture
+
+- `bot.py` — Telegram UI, commands and workflows
+- `config.py` — environment configuration
+- `database.py` — SQLite channels/post history/scheduling
+- `keyboards.py` — reusable control-panel keyboards
+- `services.py` — publishing/editing/time helpers
+
+## Planned advanced modules
+
+The architecture is ready to extend with subscriber/access management, invite-link lifecycle, payment integrations, richer analytics, reusable post templates, recurring schedules, moderation workflows and an optional AI content assistant.
+
+A smaller client-specific edition can be derived from this project without exposing or requiring the full manager feature set.
