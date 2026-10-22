@@ -1,89 +1,139 @@
 # TG-CHANNEL-MANAGER
 
-Full Telegram channel operations bot for managing one or many channels from a private admin control panel.
+A multi-user Telegram bot-management platform.
 
-## Full version
-
-### Publishing
-- Text, photo, video and document posts
-- Media captions
-- Preview before publish
-- Publish immediately or schedule for later
-- Quick text publishing command
-- No local media archive required: Telegram message references are reused
-
-### Channel management
-- Multiple managed channels
-- Add/disable channels without changing code
-- Verify the bot is an administrator before adding a channel
-- Channel aliases
-- Per-channel publishing
-
-### Post management
-- Persistent SQLite post history
-- Edit text posts and media captions
-- Delete posts
-- Pin/unpin posts
-- Manage arbitrary channel message IDs when Telegram permits the bot action
-- Scheduled-post records survive bot restarts
-
-### Administration
-- Strict admin-user allowlist
-- Button-based private control panel
-- Dashboard
-- Direct command fallback
-- Secrets/configuration through environment variables
-- Configurable timezone and database location
-
-## Install
-
-```bash
-git clone https://github.com/TRomeoPrince/TG-CHANNEL-MANAGER.git
-cd TG-CHANNEL-MANAGER
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-python bot.py
-```
-
-Fill in `.env` before running.
-
-## Telegram setup
-
-Create the bot with BotFather, add it as administrator to every channel it should manage, and grant only the permissions you need: posting, editing/deleting messages and pinning.
-
-Open the bot privately and send `/id`. Put your Telegram ID in `ADMIN_USER_IDS`, restart, then use `/start`.
-
-## Main commands
-
-- `/start` — full control panel
-- `/id`
-- `/addchannel <@username|-100id> [alias]`
-- `/removechannel <channel id>`
-- `/channels`
-- `/post <text>`
-- `/edit <channel> <message_id> <text>`
-- `/delete <channel> <message_id>`
-- `/pin <channel> <message_id>`
-- `/unpin <channel> <message_id>`
-
-## Editing limitation
-
-The Telegram Bot API does not allow a bot to impersonate your personal Telegram account. The manager can fully manage posts it authored and can perform administrator moderation actions Telegram exposes to bots. Arbitrarily editing the text of a message authored by your personal account is not a Bot API capability.
-
-An MTProto user-account controller is possible as a separate optional architecture, but it requires authenticating and protecting a real Telegram account session. It is deliberately not bundled into the default bot.
+Users create their own Telegram bots through Telegram's native **Managed Bots**
+flow. They do not paste BotFather tokens into the manager. Each created bot is
+owned by the user and managed by this platform.
 
 ## Architecture
 
-- `bot.py` — Telegram UI, commands and workflows
-- `config.py` — environment configuration
-- `database.py` — SQLite channels/post history/scheduling
-- `keyboards.py` — reusable control-panel keyboards
-- `services.py` — publishing/editing/time helpers
+```
+Master Manager Bot
+        |
+        +-- User A
+        |     +-- @UserABot
+        |            +-- Channel 1
+        |            +-- Group 1
+        |
+        +-- User B
+              +-- @UserBBot
+                     +-- Channel 2
+                     +-- Group 2
+```
 
-## Planned advanced modules
+The master bot receives Telegram's `managed_bot` update, obtains the managed
+bot token through Telegram's authorized `getManagedBotToken` method, and
+starts that bot dynamically. Child tokens are **not stored in SQLite**.
 
-The architecture is ready to extend with subscriber/access management, invite-link lifecycle, payment integrations, richer analytics, reusable post templates, recurring schedules, moderation workflows and an optional AI content assistant.
+## What users do
 
-A smaller client-specific edition can be derived from this project without exposing or requiring the full manager feature set.
+1. Open the master manager bot.
+2. Tap **🤖 Create your own bot**.
+3. Telegram opens its native Create Bot window.
+4. Enter a bot name and @username.
+5. Telegram creates the bot under that user's ownership.
+6. TG-CHANNEL-MANAGER detects and starts it automatically.
+7. The user opens their new bot and sends `/start`.
+8. They add their bot to groups/channels they want it to manage.
+
+No BotFather token is copied or pasted by the user.
+
+## Child bot features
+
+Each created bot is automatically bound to its Telegram owner.
+
+- Detect groups/channels it is added to
+- List managed chats
+- Publish text posts
+- Schedule text posts
+- Edit posts/captions
+- Delete posts
+- Pin/unpin posts
+- Persistent SQLite chat and post records
+- Owner-only control
+
+For a channel, the child bot must be made an administrator with the permissions
+needed for the desired actions.
+
+## Manager bot setup
+
+The only bot that must be created manually is the master manager bot.
+
+1. Create it in BotFather.
+2. Open its settings in BotFather's Mini App.
+3. Enable **Bot Management Mode**.
+4. Put its token in `.env`.
+
+Telegram should report the manager bot with `can_manage_bots=true`.
+
+## Environment
+
+```env
+TELEGRAM_BOT_TOKEN=YOUR_MANAGER_BOT_TOKEN
+DATABASE_PATH=channel_manager.db
+TIMEZONE=Africa/Kampala
+```
+
+There is intentionally no hard-coded admin user ID and no hard-coded channel.
+
+## Windows installation
+
+Project home:
+
+```
+C:\Users\USER\Desktop\Bots\Telegram-Channel_Manager
+```
+
+Install/update:
+
+```bat
+cd /d "C:\Users\USER\Desktop\Bots\Telegram-Channel_Manager" && git pull && pip install -r requirements.txt
+```
+
+Create local environment file if needed:
+
+```bat
+copy .env.example .env
+notepad .env
+```
+
+Run:
+
+```bat
+python bot.py
+```
+
+## Main manager commands
+
+- `/start` — manager dashboard and native Create Bot control
+- `/mybots` — bots owned by the current Telegram user
+- `/help`
+
+## Child bot commands
+
+- `/start`
+- `/chats`
+- `/post <chat_id> <text>`
+- `/schedule <chat_id> <YYYY-MM-DD HH:MM> | <text>`
+- `/edit <chat_id> <message_id> <text>`
+- `/delete <chat_id> <message_id>`
+- `/pin <chat_id> <message_id>`
+- `/unpin <chat_id> <message_id>`
+
+## Files
+
+- `bot.py` — master manager bot
+- `child_runtime.py` — dynamically runs managed user bots
+- `database.py` — users, bots, managed chats and post records
+- `config.py` — local runtime configuration
+- `services.py` — shared post/time helpers
+
+## Security model
+
+The platform stores Telegram user IDs, bot IDs and managed chat metadata.
+Managed child-bot tokens are fetched from Telegram at runtime by the authorized
+manager bot rather than persisted in the database.
+
+Users remain owners of the bots they create and can manage them through
+Telegram/BotFather as Telegram permits.
