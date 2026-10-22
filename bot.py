@@ -29,6 +29,11 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
+# httpx logs full Telegram request URLs, which include the bot token.
+# Keep those logs quiet so credentials are never printed to the console.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger("tg-channel-manager.manager")
 
 
