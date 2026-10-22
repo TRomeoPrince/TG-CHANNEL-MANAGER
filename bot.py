@@ -1,27 +1,22 @@
 import logging
-import os
+from datetime import datetime, timezone
 
-from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+    MessageHandler, filters,
 )
 
-load_dotenv()
+from config import Settings
+from database import Database, utcnow
+from keyboards import cancel_menu, channel_picker, main_menu
+from services import content_kind, copy_to_channel, display_time, edit_post, parse_local_datetime
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()
-ADMIN_USER_IDS = {
-    int(x.strip())
-    for x in os.getenv("ADMIN_USER_IDS", "").split(",")
-    if x.strip().isdigit()
-}
+settings = Settings.from_env()
+db = Database(settings.database_path)
+if settings.default_channel:
+    db.add_channel(settings.default_channel, alias="Default")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -30,394 +25,435 @@ logging.basicConfig(
 logger = logging.getLogger("tg-channel-manager")
 
 
-def is_admin(update: Update) -> bool:
-    user = update.effective_user
-    return bool(user and user.id in ADMIN_USER_IDS)
+def is_admin(update):
+    return bool(update.effective_user and update.effective_user.id in settings.admin_user_ids)
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📤 Create Post", callback_data="create"),
-            InlineKeyboardButton("🛠 Manage Post", callback_data="manage"),
-        ],
-        [
-            InlineKeyboardButton("📌 Pin / Unpin", callback_data="pin_menu"),
-            InlineKeyboardButton("ℹ️ Channel Info", callback_data="channel_info"),
-        ],
-        [InlineKeyboardButton("❓ Help", callback_data="help")],
-    ])
-
-
-def cancel_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-    ])
-
-
-async def deny(update: Update) -> None:
+async def deny(update):
     if update.callback_query:
         await update.callback_query.answer("Unauthorized.", show_alert=True)
     elif update.effective_message:
         await update.effective_message.reply_text("Unauthorized.")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return await deny(update)
     context.user_data.clear()
     await update.effective_message.reply_text(
-        "🎬 <b>CHANNEL MANAGER</b>\n\nChoose what you want to do.",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
+        "👑 <b>TG CHANNEL MANAGER</b>\n\nFull control panel",
+        parse_mode="HTML", reply_markup=main_menu()
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return await deny(update)
     await update.effective_message.reply_text(
-        "<b>Channel Manager</b>\n\n"
-        "Use /start for the control panel.\n\n"
         "<b>Commands</b>\n"
-        "/post &lt;text&gt; — publish text\n"
-        "/edit &lt;message_id&gt; &lt;text&gt; — edit a bot-authored text post\n"
-        "/delete &lt;message_id&gt; — delete a channel post the bot may delete\n"
-        "/pin &lt;message_id&gt; — pin a post\n"
-        "/unpin &lt;message_id&gt; — unpin a post\n"
-        "/id — show your Telegram user ID\n\n"
-        "The control panel also supports text, photos, videos and documents.",
+        "/start — control panel\n"
+        "/id — your Telegram ID\n"
+        "/addchannel &lt;@username|-100id&gt; [alias] — add a channel\n"
+        "/removechannel &lt;@username|-100id&gt; — disable a channel\n"
+        "/channels — list channels\n"
+        "/post &lt;text&gt; — quick-post text to the first channel\n"
+        "/edit &lt;channel&gt; &lt;message_id&gt; &lt;text&gt;\n"
+        "/delete &lt;channel&gt; &lt;message_id&gt;\n"
+        "/pin &lt;channel&gt; &lt;message_id&gt;\n"
+        "/unpin &lt;channel&gt; &lt;message_id&gt;",
         parse_mode="HTML",
     )
 
 
-async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if user and update.effective_message:
-        await update.effective_message.reply_text(f"Your Telegram user ID: {user.id}")
+async def id_command(update, context):
+    if update.effective_user:
+        await update.effective_message.reply_text(
+            f"Your Telegram user ID: {update.effective_user.id}"
+        )
 
 
-async def post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def add_channel(update, context):
     if not is_admin(update):
         return await deny(update)
+    if not context.args:
+        return await update.effective_message.reply_text(
+            "Usage: /addchannel <@username|-100id> [alias]"
+        )
+    chat_id = context.args[0]
+    alias = " ".join(context.args[1:]).strip()
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(chat.id, me.id)
+        if member.status not in ("administrator", "creator"):
+            return await update.effective_message.reply_text(
+                "Add this bot as a channel administrator first."
+            )
+        db.add_channel(str(chat.id), chat.title or "", alias)
+        await update.effective_message.reply_text(
+            f"✅ Added {chat.title or chat.id}."
+        )
+    except (BadRequest, Forbidden) as exc:
+        await update.effective_message.reply_text(f"Could not add channel: {exc}")
+
+
+async def remove_channel(update, context):
+    if not is_admin(update):
+        return await deny(update)
+    if not context.args:
+        return await update.effective_message.reply_text(
+            "Usage: /removechannel <channel id>"
+        )
+    db.remove_channel(context.args[0])
+    await update.effective_message.reply_text("Channel disabled.")
+
+
+async def list_channels(update, context):
+    if not is_admin(update):
+        return await deny(update)
+    rows = db.channels()
+    if not rows:
+        return await update.effective_message.reply_text("No channels configured.")
+    text = ["<b>Managed channels</b>"]
+    for row in rows:
+        text.append(
+            f"• {row['alias'] or row['title'] or 'Channel'} — <code>{row['chat_id']}</code>"
+        )
+    await update.effective_message.reply_text("\n".join(text), parse_mode="HTML")
+
+
+def first_channel():
+    rows = db.channels()
+    return rows[0] if rows else None
+
+
+async def quick_post(update, context):
+    if not is_admin(update):
+        return await deny(update)
+    channel = first_channel()
+    if not channel:
+        return await update.effective_message.reply_text("Add a channel first.")
     text = " ".join(context.args).strip()
     if not text:
         return await update.effective_message.reply_text("Usage: /post <text>")
-    message = await context.bot.send_message(chat_id=CHANNEL_ID, text=text)
+    sent = await context.bot.send_message(channel["chat_id"], text)
+    pid = db.save_post(
+        channel_chat_id=channel["chat_id"], telegram_message_id=sent.message_id,
+        kind="text", text=text, status="published",
+        created_by=update.effective_user.id, created_at=utcnow(), published_at=utcnow()
+    )
     await update.effective_message.reply_text(
-        f"✅ Posted. Message ID: <code>{message.message_id}</code>",
-        parse_mode="HTML",
+        f"✅ Published. Record #{pid}, Telegram message {sent.message_id}."
     )
 
 
-async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def direct_action(update, context, action):
     if not is_admin(update):
         return await deny(update)
-    if len(context.args) < 2 or not context.args[0].isdigit():
+    minimum = 3 if action == "edit" else 2
+    if len(context.args) < minimum or not context.args[1].isdigit():
         return await update.effective_message.reply_text(
-            "Usage: /edit <message_id> <new text>"
+            f"Usage: /{action} <channel> <message_id>"
+            + (" <text>" if action == "edit" else "")
         )
-    message_id = int(context.args[0])
-    text = " ".join(context.args[1:]).strip()
+    channel, mid = context.args[0], int(context.args[1])
     try:
-        await context.bot.edit_message_text(
-            chat_id=CHANNEL_ID, message_id=message_id, text=text
-        )
-        await update.effective_message.reply_text("✅ Post updated.")
-    except BadRequest as exc:
-        await update.effective_message.reply_text(f"Could not edit that post: {exc}")
-
-
-async def delete_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update):
-        return await deny(update)
-    if not context.args or not context.args[0].isdigit():
-        return await update.effective_message.reply_text("Usage: /delete <message_id>")
-    try:
-        await context.bot.delete_message(
-            chat_id=CHANNEL_ID, message_id=int(context.args[0])
-        )
-        await update.effective_message.reply_text("🗑 Post deleted.")
+        if action == "edit":
+            await edit_post(context.bot, channel, mid, " ".join(context.args[2:]))
+        elif action == "delete":
+            await context.bot.delete_message(channel, mid)
+        elif action == "pin":
+            await context.bot.pin_chat_message(channel, mid, disable_notification=True)
+        else:
+            await context.bot.unpin_chat_message(channel, mid)
+        await update.effective_message.reply_text("✅ Done.")
     except (BadRequest, Forbidden) as exc:
-        await update.effective_message.reply_text(f"Could not delete that post: {exc}")
+        await update.effective_message.reply_text(f"Telegram refused that action: {exc}")
 
 
-async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def edit_cmd(u,c): return await direct_action(u,c,"edit")
+async def delete_cmd(u,c): return await direct_action(u,c,"delete")
+async def pin_cmd(u,c): return await direct_action(u,c,"pin")
+async def unpin_cmd(u,c): return await direct_action(u,c,"unpin")
+
+
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return await deny(update)
-    if not context.args or not context.args[0].isdigit():
-        return await update.effective_message.reply_text("Usage: /pin <message_id>")
-    try:
-        await context.bot.pin_chat_message(
-            chat_id=CHANNEL_ID,
-            message_id=int(context.args[0]),
-            disable_notification=True,
-        )
-        await update.effective_message.reply_text("📌 Post pinned.")
-    except (BadRequest, Forbidden) as exc:
-        await update.effective_message.reply_text(f"Could not pin that post: {exc}")
-
-
-async def unpin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update):
-        return await deny(update)
-    if not context.args or not context.args[0].isdigit():
-        return await update.effective_message.reply_text("Usage: /unpin <message_id>")
-    try:
-        await context.bot.unpin_chat_message(
-            chat_id=CHANNEL_ID, message_id=int(context.args[0])
-        )
-        await update.effective_message.reply_text("📍 Post unpinned.")
-    except (BadRequest, Forbidden) as exc:
-        await update.effective_message.reply_text(f"Could not unpin that post: {exc}")
-
-
-async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update):
-        return await deny(update)
-    query = update.callback_query
-    await query.answer()
-    action = query.data
+    q = update.callback_query
+    await q.answer()
+    action = q.data
 
     if action == "cancel":
         context.user_data.clear()
-        return await query.edit_message_text(
-            "🎬 <b>CHANNEL MANAGER</b>\n\nChoose what you want to do.",
-            parse_mode="HTML",
-            reply_markup=main_menu(),
+        return await q.edit_message_text(
+            "👑 <b>TG CHANNEL MANAGER</b>\n\nFull control panel",
+            parse_mode="HTML", reply_markup=main_menu()
         )
 
     if action == "create":
-        context.user_data["mode"] = "create"
-        return await query.edit_message_text(
-            "📤 <b>Create Post</b>\n\n"
-            "Send me the content you want published.\n\n"
-            "Supported: 📝 text, 🖼 photo, 🎥 video, 📁 document.\n"
-            "For media, add the caption before sending it.",
-            parse_mode="HTML",
-            reply_markup=cancel_menu(),
-        )
-
-    if action == "manage":
-        context.user_data["mode"] = "manage_id"
-        return await query.edit_message_text(
-            "🛠 <b>Manage Post</b>\n\nSend the channel message ID you want to manage.",
-            parse_mode="HTML",
-            reply_markup=cancel_menu(),
-        )
-
-    if action == "pin_menu":
-        context.user_data["mode"] = "pin_id"
-        return await query.edit_message_text(
-            "📌 <b>Pin / Unpin</b>\n\nSend the channel message ID.",
-            parse_mode="HTML",
-            reply_markup=cancel_menu(),
-        )
-
-    if action == "channel_info":
-        try:
-            chat = await context.bot.get_chat(CHANNEL_ID)
-            count = await context.bot.get_chat_member_count(CHANNEL_ID)
-            return await query.edit_message_text(
-                f"ℹ️ <b>{chat.title or 'Channel'}</b>\n\n"
-                f"ID: <code>{chat.id}</code>\n"
-                f"Members/Subscribers: <b>{count}</b>\n"
-                f"Type: {chat.type}",
-                parse_mode="HTML",
-                reply_markup=main_menu(),
+        channels = db.channels()
+        if not channels:
+            return await q.edit_message_text(
+                "No channels yet. Use /addchannel first.", reply_markup=main_menu()
             )
-        except (BadRequest, Forbidden) as exc:
-            return await query.edit_message_text(
-                f"Could not read channel info: {exc}", reply_markup=main_menu()
-            )
+        context.user_data.clear()
+        return await q.edit_message_text(
+            "📤 <b>Create Post</b>\nChoose destination:",
+            parse_mode="HTML", reply_markup=channel_picker(channels, "create_channel")
+        )
 
-    if action == "help":
-        return await query.edit_message_text(
-            "❓ <b>How to use it</b>\n\n"
-            "Create Post lets you send text/media to the channel.\n"
-            "Manage Post lets you edit text/captions or delete a post.\n"
-            "Pin / Unpin manages pinned messages.\n\n"
-            "Tip: posts created through this bot are the easiest to manage later.",
-            parse_mode="HTML",
-            reply_markup=main_menu(),
+    if action.startswith("create_channel:"):
+        channel_db_id = int(action.split(":")[1])
+        channel = next((x for x in db.channels() if x["id"] == channel_db_id), None)
+        if not channel:
+            return await q.edit_message_text("Channel unavailable.", reply_markup=main_menu())
+        context.user_data.update(mode="compose", channel_id=channel["chat_id"])
+        return await q.edit_message_text(
+            "Send the post now. Text, photo, video and documents are supported. "
+            "Add captions before sending media.",
+            reply_markup=cancel_menu()
         )
 
     if action.startswith("publish:"):
-        source_id = int(action.split(":", 1)[1])
-        try:
-            sent = await context.bot.copy_message(
-                chat_id=CHANNEL_ID,
-                from_chat_id=query.message.chat_id,
-                message_id=source_id,
-            )
-            context.user_data.clear()
-            return await query.edit_message_text(
-                f"✅ Published. Channel message ID: <code>{sent.message_id}</code>",
-                parse_mode="HTML",
-                reply_markup=main_menu(),
-            )
-        except (BadRequest, Forbidden) as exc:
-            return await query.edit_message_text(
-                f"Could not publish: {exc}", reply_markup=main_menu()
-            )
-
-    if action == "discard":
+        source_id = int(action.split(":")[1])
+        channel_id = context.user_data.get("channel_id")
+        sent = await copy_to_channel(context.bot, channel_id, q.message.chat_id, source_id)
+        source = context.user_data.get("draft", {})
+        pid = db.save_post(
+            channel_chat_id=channel_id, telegram_message_id=sent.message_id,
+            kind=source.get("kind","unknown"), text=source.get("text"),
+            source_chat_id=str(q.message.chat_id), source_message_id=source_id,
+            status="published", created_by=q.from_user.id, created_at=utcnow(),
+            published_at=utcnow()
+        )
         context.user_data.clear()
-        return await query.edit_message_text("Draft discarded.", reply_markup=main_menu())
+        return await q.edit_message_text(
+            f"✅ Published. Record #{pid}; message <code>{sent.message_id}</code>.",
+            parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    if action.startswith("schedule:"):
+        context.user_data["mode"] = "schedule_time"
+        context.user_data["source_message_id"] = int(action.split(":")[1])
+        return await q.edit_message_text(
+            "⏰ Send local time as <code>YYYY-MM-DD HH:MM</code>\n"
+            f"Timezone: <b>{settings.timezone.key}</b>",
+            parse_mode="HTML", reply_markup=cancel_menu()
+        )
+
+    if action == "posts":
+        rows = db.recent_posts()
+        lines = ["🗂 <b>Recent post history</b>"]
+        for row in rows:
+            lines.append(
+                f"#{row['id']} • {row['status']} • {row['kind']} • "
+                f"<code>{row['telegram_message_id'] or '-'}</code>"
+            )
+        if len(lines) == 1:
+            lines.append("No recorded posts yet.")
+        return await q.edit_message_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    if action == "scheduled":
+        rows = db.scheduled_posts()
+        lines = ["⏰ <b>Scheduled posts</b>"]
+        for row in rows:
+            lines.append(
+                f"#{row['id']} • {display_time(row['scheduled_for'], settings.timezone)}"
+            )
+        if len(lines) == 1:
+            lines.append("Nothing scheduled.")
+        return await q.edit_message_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    if action == "channels":
+        rows = db.channels()
+        lines = ["📺 <b>Channels</b>"]
+        for row in rows:
+            lines.append(
+                f"• {row['alias'] or row['title']} — <code>{row['chat_id']}</code>"
+            )
+        if len(lines) == 1:
+            lines.append("Use /addchannel to connect one.")
+        return await q.edit_message_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    if action == "dashboard":
+        channels = db.channels()
+        recent = db.recent_posts(100)
+        published = sum(1 for x in recent if x["status"] == "published")
+        scheduled = sum(1 for x in recent if x["status"] == "scheduled")
+        return await q.edit_message_text(
+            "📊 <b>Dashboard</b>\n\n"
+            f"Managed channels: <b>{len(channels)}</b>\n"
+            f"Recent published records: <b>{published}</b>\n"
+            f"Scheduled: <b>{scheduled}</b>",
+            parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    if action == "manage":
+        context.user_data.clear()
+        context.user_data["mode"] = "manage_channel"
+        return await q.edit_message_text(
+            "Send: <code>&lt;channel id/@username&gt; &lt;message id&gt;</code>",
+            parse_mode="HTML", reply_markup=cancel_menu()
+        )
+
+    if action == "help":
+        return await q.edit_message_text(
+            "❓ <b>Full Manager</b>\n\n"
+            "• Multiple channels\n• Text + media publishing\n"
+            "• Preview/publish/schedule\n• Persistent post history\n"
+            "• Edit/delete/pin/unpin by message ID\n• Dashboard\n\n"
+            "Use /help for direct commands.",
+            parse_mode="HTML", reply_markup=main_menu()
+        )
 
     if action.startswith("manage_edit:"):
-        message_id = int(action.split(":", 1)[1])
-        context.user_data["mode"] = "edit_content"
-        context.user_data["target_message_id"] = message_id
-        return await query.edit_message_text(
-            "✏️ Send the replacement text or new caption.",
-            reply_markup=cancel_menu(),
-        )
+        _, channel, mid = action.split(":", 2)
+        context.user_data.update(mode="manage_edit_text", channel_id=channel, message_id=int(mid))
+        return await q.edit_message_text("Send replacement text/caption.", reply_markup=cancel_menu())
 
     if action.startswith("manage_delete:"):
-        message_id = int(action.split(":", 1)[1])
-        context.user_data["target_message_id"] = message_id
-        return await query.edit_message_text(
-            f"Delete channel message <code>{message_id}</code>?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 Yes, delete", callback_data=f"confirm_delete:{message_id}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-            ]),
-        )
-
-    if action.startswith("confirm_delete:"):
-        message_id = int(action.split(":", 1)[1])
+        _, channel, mid = action.split(":", 2)
         try:
-            await context.bot.delete_message(CHANNEL_ID, message_id)
-            context.user_data.clear()
-            return await query.edit_message_text(
-                "🗑 Post deleted.", reply_markup=main_menu()
-            )
+            await context.bot.delete_message(channel, int(mid))
+            return await q.edit_message_text("🗑 Deleted.", reply_markup=main_menu())
         except (BadRequest, Forbidden) as exc:
-            return await query.edit_message_text(
-                f"Could not delete that post: {exc}", reply_markup=main_menu()
-            )
+            return await q.edit_message_text(f"Could not delete: {exc}", reply_markup=main_menu())
 
-    if action.startswith("do_pin:") or action.startswith("do_unpin:"):
-        message_id = int(action.split(":", 1)[1])
+    if action.startswith("manage_pin:") or action.startswith("manage_unpin:"):
+        parts = action.split(":")
+        verb, channel, mid = parts[0], parts[1], int(parts[2])
         try:
-            if action.startswith("do_pin:"):
-                await context.bot.pin_chat_message(
-                    CHANNEL_ID, message_id, disable_notification=True
-                )
-                result = "📌 Post pinned."
+            if verb == "manage_pin":
+                await context.bot.pin_chat_message(channel, mid, disable_notification=True)
             else:
-                await context.bot.unpin_chat_message(CHANNEL_ID, message_id)
-                result = "📍 Post unpinned."
-            context.user_data.clear()
-            return await query.edit_message_text(result, reply_markup=main_menu())
+                await context.bot.unpin_chat_message(channel, mid)
+            return await q.edit_message_text("✅ Done.", reply_markup=main_menu())
         except (BadRequest, Forbidden) as exc:
-            return await query.edit_message_text(
-                f"Could not update pin: {exc}", reply_markup=main_menu()
-            )
+            return await q.edit_message_text(f"Could not update pin: {exc}", reply_markup=main_menu())
 
 
-async def admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return await deny(update)
-    message = update.effective_message
+    msg = update.effective_message
     mode = context.user_data.get("mode")
 
-    if mode == "create":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Publish", callback_data=f"publish:{message.message_id}")],
-            [InlineKeyboardButton("❌ Discard", callback_data="discard")],
-        ])
-        return await message.reply_text(
-            "👀 Preview received. Publish this to the channel?",
-            reply_markup=keyboard,
-        )
-
-    if mode == "manage_id":
-        if not message.text or not message.text.strip().isdigit():
-            return await message.reply_text("Send a numeric message ID.")
-        mid = int(message.text.strip())
-        context.user_data["target_message_id"] = mid
-        return await message.reply_text(
-            f"Managing channel message <code>{mid}</code>.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Edit text/caption", callback_data=f"manage_edit:{mid}")],
-                [InlineKeyboardButton("🗑 Delete", callback_data=f"manage_delete:{mid}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-            ]),
-        )
-
-    if mode == "edit_content":
-        mid = context.user_data.get("target_message_id")
-        new_text = (message.text or message.caption or "").strip()
-        if not new_text:
-            return await message.reply_text("Send text for the new message/caption.")
-        try:
-            try:
-                await context.bot.edit_message_text(CHANNEL_ID, mid, text=new_text)
-            except BadRequest:
-                await context.bot.edit_message_caption(CHANNEL_ID, mid, caption=new_text)
-            context.user_data.clear()
-            return await message.reply_text("✅ Post updated.", reply_markup=main_menu())
-        except (BadRequest, Forbidden) as exc:
-            return await message.reply_text(
-                f"Could not edit that post: {exc}", reply_markup=main_menu()
-            )
-
-    if mode == "pin_id":
-        if not message.text or not message.text.strip().isdigit():
-            return await message.reply_text("Send a numeric message ID.")
-        mid = int(message.text.strip())
-        return await message.reply_text(
-            f"What should I do with message <code>{mid}</code>?",
-            parse_mode="HTML",
+    if mode == "compose":
+        context.user_data["draft"] = {
+            "kind": content_kind(msg),
+            "text": msg.text or msg.caption,
+        }
+        return await msg.reply_text(
+            "👀 Draft received. What next?",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("📌 Pin", callback_data=f"do_pin:{mid}"),
-                    InlineKeyboardButton("📍 Unpin", callback_data=f"do_unpin:{mid}"),
+                    InlineKeyboardButton("✅ Publish now", callback_data=f"publish:{msg.message_id}"),
+                    InlineKeyboardButton("⏰ Schedule", callback_data=f"schedule:{msg.message_id}"),
                 ],
                 [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-            ]),
+            ])
         )
 
-    await message.reply_text("Use /start to open the channel control panel.")
+    if mode == "schedule_time":
+        try:
+            when = parse_local_datetime(msg.text or "", settings.timezone)
+        except ValueError as exc:
+            return await msg.reply_text(str(exc))
+        if when <= datetime.now(timezone.utc):
+            return await msg.reply_text("Schedule time must be in the future.")
+        draft = context.user_data.get("draft", {})
+        pid = db.save_post(
+            channel_chat_id=context.user_data["channel_id"],
+            kind=draft.get("kind","unknown"), text=draft.get("text"),
+            source_chat_id=str(msg.chat_id),
+            source_message_id=context.user_data["source_message_id"],
+            status="scheduled", scheduled_for=when.isoformat(),
+            created_by=msg.from_user.id, created_at=utcnow()
+        )
+        context.user_data.clear()
+        return await msg.reply_text(
+            f"⏰ Scheduled as record #{pid}.", reply_markup=main_menu()
+        )
+
+    if mode == "manage_channel":
+        parts = (msg.text or "").split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            return await msg.reply_text("Use: <channel> <message_id>")
+        channel, mid = parts[0], int(parts[1])
+        return await msg.reply_text(
+            f"Manage <code>{channel}</code> message <code>{mid}</code>:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Edit", callback_data=f"manage_edit:{channel}:{mid}")],
+                [InlineKeyboardButton("🗑 Delete", callback_data=f"manage_delete:{channel}:{mid}")],
+                [
+                    InlineKeyboardButton("📌 Pin", callback_data=f"manage_pin:{channel}:{mid}"),
+                    InlineKeyboardButton("📍 Unpin", callback_data=f"manage_unpin:{channel}:{mid}"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
+            ])
+        )
+
+    if mode == "manage_edit_text":
+        try:
+            await edit_post(
+                context.bot, context.user_data["channel_id"],
+                context.user_data["message_id"], msg.text or msg.caption or ""
+            )
+            context.user_data.clear()
+            return await msg.reply_text("✅ Updated.", reply_markup=main_menu())
+        except (BadRequest, Forbidden) as exc:
+            return await msg.reply_text(f"Could not edit: {exc}", reply_markup=main_menu())
+
+    await msg.reply_text("Use /start to open the control panel.")
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def publish_due(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(timezone.utc).isoformat()
+    for row in db.due_posts(now):
+        try:
+            sent = await copy_to_channel(
+                context.bot, row["channel_chat_id"],
+                row["source_chat_id"], row["source_message_id"]
+            )
+            db.mark_published(row["id"], sent.message_id)
+        except Exception:
+            logger.exception("Failed scheduled post #%s", row["id"])
+
+
+async def error_handler(update, context):
     logger.exception("Unhandled update error", exc_info=context.error)
 
 
-def main() -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
-    if not CHANNEL_ID:
-        raise RuntimeError("TELEGRAM_CHANNEL_ID is missing.")
-    if not ADMIN_USER_IDS:
-        raise RuntimeError("ADMIN_USER_IDS is missing.")
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("id", id_command))
-    app.add_handler(CommandHandler("post", post))
-    app.add_handler(CommandHandler("edit", edit))
-    app.add_handler(CommandHandler("delete", delete_post))
-    app.add_handler(CommandHandler("pin", pin))
-    app.add_handler(CommandHandler("unpin", unpin))
-    app.add_handler(CallbackQueryHandler(panel_callback))
-    app.add_handler(
-        MessageHandler(
-            filters.ChatType.PRIVATE
-            & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
-            & ~filters.COMMAND,
-            admin_message,
-        )
-    )
+def main():
+    app = Application.builder().token(settings.bot_token).build()
+    for name, fn in [
+        ("start", start), ("help", help_command), ("id", id_command),
+        ("addchannel", add_channel), ("removechannel", remove_channel),
+        ("channels", list_channels), ("post", quick_post),
+        ("edit", edit_cmd), ("delete", delete_cmd), ("pin", pin_cmd),
+        ("unpin", unpin_cmd),
+    ]:
+        app.add_handler(CommandHandler(name, fn))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE
+        & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL)
+        & ~filters.COMMAND,
+        private_message
+    ))
     app.add_error_handler(error_handler)
-
-    logger.info("TG-CHANNEL-MANAGER started")
+    if app.job_queue is None:
+        raise RuntimeError("JobQueue unavailable. Install python-telegram-bot[job-queue].")
+    app.job_queue.run_repeating(publish_due, interval=20, first=5)
+    logger.info("TG-CHANNEL-MANAGER full version started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
